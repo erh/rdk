@@ -43,7 +43,7 @@ func TestIKTolerances(t *testing.T) {
 	pc, err := newPlanContext(ctx, logger, request, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, seed, goal)
+	psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{seed}, goal)
 	test.That(t, err, test.ShouldBeNil)
 
 	mp, err := newCBiRRTMotionPlanner(ctx, pc, psc, logger.Sublogger("cbirrt"))
@@ -69,7 +69,7 @@ func TestIKTolerances(t *testing.T) {
 	pc2, err := newPlanContext(ctx, logger, request2, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc2, err := newPlanSegmentContext(ctx, pc2, seed, goal)
+	psc2, err := newPlanSegmentContext(ctx, pc2, []*referenceframe.LinearInputs{seed}, goal)
 	test.That(t, err, test.ShouldBeNil)
 
 	mp2, err := newCBiRRTMotionPlanner(ctx, pc2, psc2, logger.Sublogger("cbirrt"))

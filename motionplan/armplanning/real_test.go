@@ -258,7 +258,7 @@ func TestSandingLargeMove1(t *testing.T) {
 	pc, err := newPlanContext(ctx, logger, req, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, req.StartState.LinearConfiguration(), req.Goals[0].poses)
+	psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{req.StartState.LinearConfiguration()}, req.Goals[0].poses)
 	test.That(t, err, test.ShouldBeNil)
 
 	solution, err := initRRTSolutions(context.Background(), psc, logger.Sublogger("solve"))
@@ -457,7 +457,7 @@ func TestSandingWallCollision(t *testing.T) {
 		pc, err := newPlanContext(ctx, logger, req, &PlanMeta{})
 		test.That(t, err, test.ShouldBeNil)
 
-		psc, err := newPlanSegmentContext(ctx, pc, req.StartState.LinearConfiguration(), req.Goals[0].Poses())
+		psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{req.StartState.LinearConfiguration()}, req.Goals[0].Poses())
 		test.That(t, err, test.ShouldBeNil)
 
 		trajectory := plan.Trajectory()

@@ -255,6 +255,12 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 		return
 	}
 
+	isMonotonic := sss.psc.isMonotonic(step, myCost)
+
+	if !isMonotonic {
+		//myCost += .2
+	}
+	
 	for _, oldSol := range sss.solutions {
 		similarity := &motionplan.SegmentFS{
 			StartConfiguration: oldSol.inputs,
@@ -294,7 +300,7 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 	}
 
 	whyNot := sss.psc.checkPath(ctx, sss.psc.start, step, false)
-	sss.logger.Debugf("got score %0.4f @ %v - %s - result: %v", myNode.cost, now, stepSolution.Meta, whyNot)
+	sss.logger.Debugf("got score %0.4f @ %v - %s - result: %v monotonic: %d", myNode.cost, now, stepSolution.Meta, whyNot, isMonotonic)
 	myNode.checkPath = whyNot == nil
 
 	if whyNot == nil && myNode.cost < sss.bestScoreNoProblem {

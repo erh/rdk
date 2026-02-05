@@ -88,7 +88,7 @@ func TestSmoothPlans1(t *testing.T) {
 	pc, err := newPlanContext(ctx, logger, req, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, req.StartState.LinearConfiguration(), req.Goals[0].Poses())
+	psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{req.StartState.LinearConfiguration()}, req.Goals[0].Poses())
 	test.That(t, err, test.ShouldBeNil)
 
 	// Convert []*node to []referenceframe.FrameSystemInputs for smoothPath
@@ -119,7 +119,7 @@ func BenchmarkSmoothPlans1(b *testing.B) {
 	pc, err := newPlanContext(ctx, logger, req, &PlanMeta{})
 	test.That(b, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, req.StartState.LinearConfiguration(), req.Goals[0].Poses())
+	psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{req.StartState.LinearConfiguration()}, req.Goals[0].Poses())
 	test.That(b, err, test.ShouldBeNil)
 
 	// Convert []*node to []referenceframe.FrameSystemInputs for smoothPath

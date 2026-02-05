@@ -70,7 +70,7 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 		}
 
 		if len(g.Configuration()) > 0 {
-			newTraj, err := pm.planToDirectJoints(ctx, linearTraj[len(linearTraj)-1], g)
+			newTraj, err := pm.planToDirectJoints(ctx, linearTraj, g)
 			if err != nil {
 				return linearTraj, err
 			}
@@ -92,7 +92,7 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 
 			for subGoalIdx, sg := range subGoals {
 				singleGoalStart := time.Now()
-				newTraj, err := pm.planSingleGoal(ctx, linearTraj[len(linearTraj)-1], sg, cbirrtAllowed)
+				newTraj, err := pm.planSingleGoal(ctx, linearTraj, sg, cbirrtAllowed)
 				if err != nil {
 					pm.logger.Infof("\t subgoal %d failed after %v with: %v", subGoalIdx, time.Since(singleGoalStart), err)
 					return linearTraj, err
@@ -109,11 +109,14 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 
 func (pm *planManager) planToDirectJoints(
 	ctx context.Context,
-	start *referenceframe.LinearInputs,
+	prevPath []*referenceframe.LinearInputs,
 	goal *PlanState,
 ) ([]*referenceframe.LinearInputs, error) {
 	ctx, span := trace.StartSpan(ctx, "planToDirectJoints")
 	defer span.End()
+
+	start := prevPath[len(prevPath)-1]
+	
 	fullConfig := referenceframe.NewLinearInputs()
 	for k, v := range goal.Configuration() {
 		fullConfig.Put(k, v)
@@ -130,7 +133,7 @@ func (pm *planManager) planToDirectJoints(
 		return nil, err
 	}
 
-	psc, err := newPlanSegmentContext(ctx, pm.pc, start, goalPoses)
+	psc, err := newPlanSegmentContext(ctx, pm.pc, prevPath, goalPoses)
 	if err != nil {
 		return nil, err
 	}
@@ -169,16 +172,19 @@ func (pm *planManager) planToDirectJoints(
 
 func (pm *planManager) planSingleGoal(
 	ctx context.Context,
-	start *referenceframe.LinearInputs,
+	prevPath []*referenceframe.LinearInputs,
 	goal referenceframe.FrameSystemPoses,
 	cbirrtAllowed bool,
 ) ([]*referenceframe.LinearInputs, error) {
 	ctx, span := trace.StartSpan(ctx, "planSingleGoal")
 	defer span.End()
+
+	start := prevPath[len(prevPath)-1]
+	
 	pm.logger.Debug("start configuration", logging.FloatArrayFormat{"", start.GetLinearizedInputs()})
 	pm.logger.Debug("going to", goal)
 
-	psc, err := newPlanSegmentContext(ctx, pm.pc, start, goal)
+	psc, err := newPlanSegmentContext(ctx, pm.pc, prevPath, goal)
 	if err != nil {
 		return nil, err
 	}

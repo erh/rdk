@@ -43,7 +43,7 @@ func TestSimpleLinearMotion(t *testing.T) {
 	pc, err := newPlanContext(ctx, logger, request, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, referenceframe.FrameSystemInputs{m.Name(): home7}.ToLinearInputs(), goal)
+	psc, err := newPlanSegmentContext(ctx, pc, []*referenceframe.LinearInputs{referenceframe.FrameSystemInputs{m.Name(): home7}.ToLinearInputs()}, goal)
 	test.That(t, err, test.ShouldBeNil)
 
 	mp, err := newCBiRRTMotionPlanner(ctx, pc, psc, logger.Sublogger("cbirrt"))

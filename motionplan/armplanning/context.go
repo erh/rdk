@@ -76,6 +76,7 @@ func (pc *planContext) linearizeFSmetric(metric motionplan.StateFSMetric) ik.Cos
 type planSegmentContext struct {
 	pc *planContext
 
+	prevPath []*referenceframe.LinearInputs
 	start    *referenceframe.LinearInputs
 	origGoal referenceframe.FrameSystemPoses // goals are defined in frames willy nilly
 	goal     referenceframe.FrameSystemPoses // all in world
@@ -86,13 +87,18 @@ type planSegmentContext struct {
 	checker      *motionplan.ConstraintChecker
 }
 
-func newPlanSegmentContext(ctx context.Context, pc *planContext, start *referenceframe.LinearInputs,
+func newPlanSegmentContext(ctx context.Context, pc *planContext,
+	prevPath []*referenceframe.LinearInputs,
 	goal referenceframe.FrameSystemPoses,
 ) (*planSegmentContext, error) {
 	_, span := trace.StartSpan(ctx, "newPlanSegmentContext")
 	defer span.End()
+
+	start := prevPath[len(prevPath)-1]
+	
 	psc := &planSegmentContext{
 		pc:       pc,
+		prevPath: prevPath,
 		start:    start,
 		origGoal: goal,
 	}
@@ -153,6 +159,38 @@ func (psc *planSegmentContext) checkPath(ctx context.Context, start, end *refere
 		checkFinal,
 	)
 	return err
+}
+
+func (psc *planSegmentContext) isMonotonic(step *referenceframe.LinearInputs, cost float64) bool {
+	if len(psc.prevPath) < 2 {
+		return true
+	}
+
+	a := psc.prevPath[len(psc.prevPath)-2].GetLinearizedInputs()
+	b := psc.prevPath[len(psc.prevPath)-1].GetLinearizedInputs()
+
+	for idx, v := range step.GetLinearizedInputs() {
+		aa := a[idx]
+		bb := b[idx]
+		if bb > aa {
+			if v < bb {
+				return false
+			}
+		} else if bb < aa {
+			if v > bb {
+				return false//badJoints++
+			}
+		}
+	}
+
+	return true
+	//psc.pc.logger.Infof("eliot %v %0.5f", badJoints, cost)
+
+	//	if cost < 1 {
+	//return cost + float64(badJoints), badJoints
+	//	}
+	
+	//	return cost * (1 + badJoints))
 }
 
 func translateGoalsToWorldPosition(

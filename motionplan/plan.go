@@ -182,3 +182,55 @@ func (traj Trajectory) EvaluateCost(distFunc SegmentFSMetric) float64 {
 	}
 	return totalCost
 }
+
+// JointDirectionChanges counts the number of times each joint changes direction during the trajectory.
+// Returns a slice where each element corresponds to a joint in the linearized configuration,
+// and the value is the count of direction changes for that joint.
+func (traj Trajectory) JointDirectionChanges() []int {
+	if len(traj) < 3 {
+		// Need at least 3 points to detect a direction change
+		return nil
+	}
+
+	// Convert first step to get the size of linearized inputs
+	first := traj[0].ToLinearInputs()
+	numJoints := len(first.GetLinearizedInputs())
+	if numJoints == 0 {
+		return nil
+	}
+
+	changes := make([]int, numJoints)
+	prev := first.GetLinearizedInputs()
+
+	// Get the initial direction for each joint
+	second := traj[1].ToLinearInputs().GetLinearizedInputs()
+	prevDirection := make([]referenceframe.Input, numJoints)
+	for i := 0; i < numJoints; i++ {
+		prevDirection[i] = second[i] - prev[i]
+	}
+
+	// Iterate through remaining trajectory points
+	for idx := 2; idx < len(traj); idx++ {
+		curr := traj[idx].ToLinearInputs().GetLinearizedInputs()
+
+		for i := 0; i < numJoints; i++ {
+			currDirection := curr[i] - second[i]
+
+			// Check if direction changed (sign change, excluding zero movements)
+			if prevDirection[i] != 0 && currDirection != 0 {
+				if (prevDirection[i] > 0 && currDirection < 0) || (prevDirection[i] < 0 && currDirection > 0) {
+					changes[i]++
+				}
+			}
+
+			// Update for next iteration
+			if currDirection != 0 {
+				prevDirection[i] = currDirection
+			}
+		}
+
+		second = curr
+	}
+
+	return changes
+}

@@ -222,7 +222,8 @@ func realMain() error {
 		time.Since(start).Truncate(time.Millisecond), len(req.Goals), len(plan.Trajectory()))
 	mylog.Printf("totalCartesion: %0.4f\n", totalCartesion)
 	mylog.Printf("totalL2: %0.4f\n", totalL2)
-
+	mylog.Printf("joint delta changes: %v\n", plan.Trajectory().JointDirectionChanges())
+	
 	for i := 0; i < *loop; i++ {
 		err = visualize(req, plan, mylog)
 		if err != nil {

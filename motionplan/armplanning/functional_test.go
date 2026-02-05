@@ -299,7 +299,7 @@ func testPlanner(t *testing.T, ctx context.Context, config planConfigConstructor
 	pc, err := newPlanContext(ctx, logger, request, &PlanMeta{})
 	test.That(t, err, test.ShouldBeNil)
 
-	psc, err := newPlanSegmentContext(ctx, pc, cfg.Start.LinearConfiguration(), cfg.Goal.poses)
+	psc, err := newPlanSegmentContext(ctx, pc, []*frame.LinearInputs{cfg.Start.LinearConfiguration()}, cfg.Goal.poses)
 	test.That(t, err, test.ShouldBeNil)
 
 	mp, err := newCBiRRTMotionPlanner(ctx, pc, psc, logger.Sublogger("cbirrt"))
