@@ -194,7 +194,7 @@ func realMain() error {
 			}
 			mylog.Printf("\t\t %s", c)
 			mylog.Printf("\t\t\t %v", pp)
-			mylog.Printf("\t\t\t joints: %v", logging.FloatArrayFormat{"%0.2f", t[c]})
+			mylog.Printf("\t\t\t joints: %v", logging.FloatArrayFormat{"%0.3f", t[c]})
 			if idx > 0 {
 				p := plan.Trajectory()[idx-1][c]
 
@@ -207,6 +207,13 @@ func realMain() error {
 					myl2n,
 					referenceframe.InputsLinfDistance(p, t[c]),
 					cart)
+
+				deltas := []float64{}
+				for i, a := range t[c] {
+					deltas = append(deltas, a-p[i])
+				}
+
+				mylog.Printf("\t\t\t\t deltas: %v", logging.FloatArrayFormat{"%0.3f", deltas})
 			}
 		}
 	}
