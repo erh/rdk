@@ -110,7 +110,8 @@ func extractPath(startMap, goalMap rrtMap, pair *nodePair, matched bool) []*refe
 type solutionSolvingState struct {
 	psc          *planSegmentContext
 	maxSolutions int
-
+	minFunc ik.CostFunc
+	
 	linearSeeds [][]float64
 	seedLimits  [][]referenceframe.Limit
 
@@ -231,11 +232,69 @@ func (sss *solutionSolvingState) computeGoodCost(goal referenceframe.FrameSystem
 	return ratios, minRatio, nil
 }
 
-// return bool is if we should stop because we're done.
 func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.Solution) {
 	ctx, span := trace.StartSpan(ctx, "process")
 	defer span.End()
 	sss.processCalls++
+
+	originalConfig := make([]float64,len(stepSolution.Configuration))
+	copy(originalConfig, stepSolution.Configuration)
+	
+	// first try cleaning
+	
+	step, err := sss.psc.pc.lis.FloatsToInputs(stepSolution.Configuration)
+	if err != nil {
+		sss.logger.Warnf("bad stepSolution.Configuration %v %v", stepSolution.Configuration, err)
+		return
+	}
+
+	_, isMonotonicArr := sss.psc.isMonotonic(step)
+
+	anythingChanged := false
+	
+	for idx, v := range stepSolution.Configuration {
+		origValue := sss.psc.start.GetLinearizedInputs()[idx]
+		diff := math.Abs(v - origValue)
+		
+		if idx == 4 {
+			sss.logger.Infof("eliot %v %0.5f", isMonotonicArr, diff)
+		}
+		
+		if diff > .01 { // don't even bother
+			continue
+		}
+		
+		if (isMonotonicArr == nil || isMonotonicArr[idx]) && diff >= .0001 {
+			continue
+		}
+		
+		stepSolution.Configuration[idx] = origValue
+		newScore := sss.minFunc(ctx, stepSolution.Configuration)
+		if idx == 4 {
+			sss.logger.Infof("eliot2 %0.5f %0.5f", newScore, stepSolution.Score)
+		}
+		if newScore > (stepSolution.Score + .01) || newScore > sss.psc.pc.planOpts.GoalThreshold {
+			// bad, so put back
+			stepSolution.Configuration[idx] = v
+			sss.logger.Infof("bad %v %v %v", idx, math.Abs(v-origValue), math.Abs(stepSolution.Score-newScore))
+		} else {
+			anythingChanged = true
+		}
+	}
+
+	if anythingChanged {
+		sss.processInternal(ctx, stepSolution)
+	}
+
+	sss.processInternal(ctx, &ik.Solution{
+		originalConfig,
+		stepSolution.Score,
+		stepSolution.Exact,
+		stepSolution.Meta,
+	})
+}
+
+func (sss *solutionSolvingState) processInternal(ctx context.Context, stepSolution *ik.Solution) {
 
 	step, err := sss.psc.pc.lis.FloatsToInputs(stepSolution.Configuration)
 	if err != nil {
@@ -255,10 +314,9 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 		return
 	}
 
-	isMonotonic := sss.psc.isMonotonic(step, myCost)
-
+	isMonotonic, _ := sss.psc.isMonotonic(step)
 	if !isMonotonic {
-		//myCost += .2
+		myCost += .2
 	}
 	
 	for _, oldSol := range sss.solutions {
@@ -269,6 +327,7 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 		}
 		simscore := sss.psc.pc.configurationDistanceFunc(similarity)
 		if simscore < defaultSimScore {
+			sss.logger.Debugf("skipping because too similar")
 			return
 		}
 	}
@@ -279,7 +338,7 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 		FS:            sss.psc.pc.fs,
 	})
 	if err != nil {
-		// sss.logger.Debugf("bad solution a: %v %v", stepSolution, err)
+		sss.logger.Debugf("bad solution %v", err)
 		if len(sss.solutions) == 0 && sss.psc.pc.isFatalCollision(err) {
 			sss.fatal = fmt.Errorf("fatal early collision: %w", err)
 		}
@@ -300,7 +359,7 @@ func (sss *solutionSolvingState) process(ctx context.Context, stepSolution *ik.S
 	}
 
 	whyNot := sss.psc.checkPath(ctx, sss.psc.start, step, false)
-	sss.logger.Debugf("got score %0.4f @ %v - %s - result: %v monotonic: %d", myNode.cost, now, stepSolution.Meta, whyNot, isMonotonic)
+	sss.logger.Debugf("got score %0.4f @ %v - %s - result: %v monotonic: %v", myNode.cost, now, stepSolution.Meta, whyNot, isMonotonic)
 	myNode.checkPath = whyNot == nil
 
 	if whyNot == nil && myNode.cost < sss.bestScoreNoProblem {
@@ -403,8 +462,7 @@ func getSolutions(ctx context.Context, psc *planSegmentContext, logger logging.L
 		return nil, err
 	}
 
-	// Spawn the IK solver to generate solutions until done
-	minFunc := psc.pc.linearizeFSmetric(psc.pc.planOpts.getGoalMetric(psc.goal))
+	solvingState.minFunc = psc.pc.linearizeFSmetric(psc.pc.planOpts.getGoalMetric(psc.goal))
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -436,7 +494,7 @@ func getSolutions(ctx context.Context, psc *planSegmentContext, logger logging.L
 		// This channel close doubles as signaling that the goroutine has exited.
 		defer close(solutionGen)
 		nSol, m, err := solver.Solve(ctxWithCancel,
-			solutionGen, solvingState.linearSeeds, solvingState.seedLimits, minFunc, psc.pc.randseed.Int())
+			solutionGen, solvingState.linearSeeds, solvingState.seedLimits, solvingState.minFunc, psc.pc.randseed.Int())
 		solvingState.logger.Debugf("Solver stopping. Solutions: %v Err? %v", nSol, err)
 
 		solveErrorLock.Lock()

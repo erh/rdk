@@ -161,36 +161,45 @@ func (psc *planSegmentContext) checkPath(ctx context.Context, start, end *refere
 	return err
 }
 
-func (psc *planSegmentContext) isMonotonic(step *referenceframe.LinearInputs, cost float64) bool {
+func (psc *planSegmentContext) isMonotonic(step *referenceframe.LinearInputs) (bool, []bool) {
 	if len(psc.prevPath) < 2 {
-		return true
+		return true, nil
 	}
 
 	a := psc.prevPath[len(psc.prevPath)-2].GetLinearizedInputs()
 	b := psc.prevPath[len(psc.prevPath)-1].GetLinearizedInputs()
 
+	anyChanges := false
+	isMonotonicArr := []bool{}
+	
 	for idx, v := range step.GetLinearizedInputs() {
 		aa := a[idx]
 		bb := b[idx]
+
+		doIChange := false
+		
 		if bb > aa {
-			if v < bb {
-				return false
+			if v <= bb {
+				doIChange = true
 			}
 		} else if bb < aa {
-			if v > bb {
-				return false//badJoints++
+			if v >= bb {
+				doIChange = true
+			}
+		} else { // bb == aa
+			if v != bb {
+				doIChange = true
 			}
 		}
+
+		if doIChange {
+			anyChanges = true
+		}
+
+		isMonotonicArr = append(isMonotonicArr, !doIChange)
 	}
 
-	return true
-	//psc.pc.logger.Infof("eliot %v %0.5f", badJoints, cost)
-
-	//	if cost < 1 {
-	//return cost + float64(badJoints), badJoints
-	//	}
-	
-	//	return cost * (1 + badJoints))
+	return !anyChanges, isMonotonicArr
 }
 
 func translateGoalsToWorldPosition(

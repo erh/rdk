@@ -97,7 +97,7 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 					pm.logger.Infof("\t subgoal %d failed after %v with: %v", subGoalIdx, time.Since(singleGoalStart), err)
 					return linearTraj, err
 				}
-				pm.logger.Infof("\t subgoal %d took %v", subGoalIdx, time.Since(singleGoalStart))
+				pm.logger.Infof("\t subgoal %d took %v step: %d", subGoalIdx, time.Since(singleGoalStart), len(linearTraj))
 				linearTraj = append(linearTraj, newTraj...)
 			}
 		}
