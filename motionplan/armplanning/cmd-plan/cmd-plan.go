@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"runtime/pprof"
 	"slices"
@@ -53,6 +54,7 @@ func realMain() error {
 	cpu := flag.String("cpu", "", "cpu profiling")
 	interactive := flag.Bool("i", false, "interactive")
 	host := flag.String("host", "", "host to execute on")
+	forceMotion := flag.Bool("force-move", false, "")
 
 	flag.Parse()
 
@@ -99,6 +101,10 @@ func realMain() error {
 		reg.Update([]logging.LoggerPatternConfig{
 			{
 				Pattern: "*.mp.*",
+				Level:   "INFO",
+			},
+			{
+				Pattern: "*.networking.*",
 				Level:   "INFO",
 			},
 		}, logger)
@@ -218,7 +224,7 @@ func realMain() error {
 					deltas = append(deltas, a-p[i])
 				}
 
-				mylog.Printf("\t\t\t\t deltas: %v", logging.FloatArrayFormat{"%0.3f", deltas})
+				mylog.Printf("\t\t\t\t deltas: %v", logging.FloatArrayFormat{"%0.5f", deltas})
 			}
 		}
 	}
@@ -238,7 +244,7 @@ func realMain() error {
 	}
 
 	if *host != "" {
-		err := executeOnArm(ctx, *host, plan, logger)
+		err := executeOnArm(ctx, *host, plan, *forceMotion, logger)
 		if err != nil {
 			return err
 		}
@@ -476,7 +482,7 @@ func doInteractive(req *armplanning.PlanRequest, plan motionplan.Plan, planErr e
 	}
 }
 
-func executeOnArm(ctx context.Context, host string, plan motionplan.Plan, logger logging.Logger) error {
+func executeOnArm(ctx context.Context, host string, plan motionplan.Plan, force bool, logger logging.Logger) error {
 	byComponent := map[string][][]referenceframe.Input{}
 
 	for _, s := range plan.Trajectory() {
@@ -527,6 +533,27 @@ func executeOnArm(ctx context.Context, host string, plan motionplan.Plan, logger
 		if !ok {
 			return fmt.Errorf("%s is not InputEnabled, is %T", cName, r)
 		}
+
+		cur, err := ie.CurrentInputs(ctx)
+		if err != nil {
+			return err
+		}
+
+		for j, v := range cur {
+			delta := math.Abs(v - allInputs[0][j])
+			if delta > .01 {
+				err = fmt.Errorf("joint %d for resource %s too far start: %0.5f go: %0.5f delta: %0.5f",
+					j, cName, v, allInputs[0][j], delta)
+				if force {
+					logger.Warnf("ignoring %v", err)
+				} else {
+					return err
+				}
+			}
+		}
+
+		logger.Infof("sending %d positions to %s", len(allInputs), cName)
+
 		err = ie.GoToInputs(ctx, allInputs...)
 		if err != nil {
 			return err
