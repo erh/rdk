@@ -22,7 +22,8 @@ import (
 )
 
 type testOptions struct {
-	doNotCloseObstacles bool
+	doNotCloseObstacles   bool
+	doNotSmoothVelocities bool
 }
 
 // PlanRequest is a struct to store all the data necessary to make a call to PlanMotion.
@@ -180,6 +181,11 @@ type PlanMeta struct {
 	Duration     time.Duration
 	Partial      bool
 	PartialError error
+
+	// VelocityBreakpoints are trajectory indices where the Cartesian direction changes
+	// significantly. Within each segment between consecutive breakpoints, joint deltas
+	// are constant (linear interpolation). Always includes 0 and len(trajectory)-1.
+	VelocityBreakpoints []int
 }
 
 // PlanMotion plans a motion from a provided plan request.

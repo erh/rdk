@@ -125,6 +125,48 @@ func TrajectoryDeltaStats(trajectory motionplan.Trajectory) []JointDeltaStats {
 	return results
 }
 
+// trajectorySegmentDeltaStats computes delta statistics for each joint within each segment
+// defined by breakpoints. It returns the worst-case (max StdDev) stats per joint across all segments.
+// This is useful for trajectories with direction changes where global stats would show
+// high StdDev at segment boundaries even though each segment is internally consistent.
+func trajectorySegmentDeltaStats(trajectory motionplan.Trajectory, breakpoints []int) []JointDeltaStats {
+	if len(breakpoints) < 2 {
+		return TrajectoryDeltaStats(trajectory)
+	}
+
+	// Compute stats for each segment, keep the worst per joint
+	worstByKey := map[string]JointDeltaStats{}
+
+	for seg := 0; seg < len(breakpoints)-1; seg++ {
+		segStart := breakpoints[seg]
+		segEnd := breakpoints[seg+1]
+		if segEnd-segStart < 2 {
+			continue
+		}
+
+		segTraj := trajectory[segStart : segEnd+1]
+		segStats := TrajectoryDeltaStats(segTraj)
+		for _, s := range segStats {
+			key := fmt.Sprintf("%s:%d", s.Component, s.JointIdx)
+			if existing, ok := worstByKey[key]; !ok || s.StdDev > existing.StdDev {
+				worstByKey[key] = s
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(worstByKey))
+	for k := range worstByKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	results := make([]JointDeltaStats, 0, len(keys))
+	for _, k := range keys {
+		results = append(results, worstByKey[k])
+	}
+	return results
+}
+
 func simpleSmoothStep(ctx context.Context, psc *planSegmentContext, steps []*referenceframe.LinearInputs, step int,
 ) []*referenceframe.LinearInputs {
 	ctx, span := trace.StartSpan(ctx, "simpleSmoothStep")

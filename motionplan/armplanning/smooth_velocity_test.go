@@ -56,3 +56,59 @@ func TestSmoothVelocityXArm6Linear(t *testing.T) {
 		test.That(t, s.StdDev, test.ShouldBeLessThan, .00001)
 	}
 }
+
+func TestSmoothVelocityXArm6LinearWithCurve(t *testing.T) {
+	logger := logging.NewTestLogger(t)
+
+	model, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/fake/kinematics/xarm6.json"), "")
+	test.That(t, err, test.ShouldBeNil)
+
+	fs := frame.NewEmptyFrameSystem("")
+	err = fs.AddFrame(model, fs.World())
+	test.That(t, err, test.ShouldBeNil)
+
+	startInputs := frame.NewZeroInputs(fs)
+
+	// xarm6 at zero joints is at approximately (207, 0, 112) with OZ: -1
+	// move 100mm in X from there
+	goal1 := spatialmath.NewPose(r3.Vector{X: 257, Y: 20, Z: 112}, &spatialmath.OrientationVector{OZ: -1})
+	goal2 := spatialmath.NewPose(r3.Vector{X: 307, Y: 0, Z: 112}, &spatialmath.OrientationVector{OZ: -1})
+
+	constraints := &motionplan.Constraints{
+		LinearConstraint: []motionplan.LinearConstraint{
+			{LineToleranceMm: 2, OrientationToleranceDegs: 1},
+		},
+	}
+
+	req := &PlanRequest{
+		FrameSystem: fs,
+		Goals: []*PlanState{
+			{poses: frame.FrameSystemPoses{model.Name(): frame.NewPoseInFrame(frame.World, goal1)}},
+			{poses: frame.FrameSystemPoses{model.Name(): frame.NewPoseInFrame(frame.World, goal2)}},
+		},
+		StartState:     &PlanState{structuredConfiguration: startInputs},
+		Constraints:    constraints,
+		PlannerOptions: NewBasicPlannerOptions(),
+	}
+
+	plan, meta, err := PlanMotion(context.Background(), logger, req)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(plan.Trajectory()), test.ShouldBeGreaterThan, 40)
+	test.That(t, len(plan.Trajectory()), test.ShouldBeLessThan, 60)
+	test.That(t, len(meta.VelocityBreakpoints), test.ShouldBeGreaterThan, 2)
+
+	stats := trajectorySegmentDeltaStats(plan.Trajectory(), meta.VelocityBreakpoints)
+	for _, s := range stats {
+		test.That(t, s.StdDev, test.ShouldBeLessThan, .00001)
+	}
+
+	// now just make sure without smoothVelocities it is broken
+	req.myTestOptions.doNotSmoothVelocities = true
+	plan, meta, err = PlanMotion(context.Background(), logger, req)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(plan.Trajectory()), test.ShouldBeGreaterThan, 40)
+	test.That(t, len(plan.Trajectory()), test.ShouldBeLessThan, 60)
+
+	stats = trajectorySegmentDeltaStats(plan.Trajectory(), meta.VelocityBreakpoints)
+	test.That(t, stats[3].StdDev, test.ShouldBeGreaterThan, .001)
+}

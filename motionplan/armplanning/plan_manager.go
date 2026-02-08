@@ -102,7 +102,9 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 				}
 				pm.logger.Infof("\t subgoal %d took %v", subGoalIdx, time.Since(singleGoalStart))
 				linearTraj = append(linearTraj, newTraj...)
-				if segmentContexts != nil {
+				if len(newTraj) > 1 { // cbirrt
+					segmentContexts = nil
+				} else if segmentContexts != nil {
 					segmentContexts = append(segmentContexts, psc)
 				}
 			}
@@ -110,13 +112,14 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 		start = to
 	}
 
-	if segmentContexts != nil {
-		newTraj, err := smoothVelocities(ctx, segmentContexts, linearTraj, pm.logger)
+	if segmentContexts != nil && !pm.request.myTestOptions.doNotSmoothVelocities {
+		newTraj, breakpoints, err := smoothVelocities(ctx, segmentContexts, linearTraj, pm.logger)
 		if err != nil {
 			pm.logger.Warnf("smoothVelocities failed: %v", err)
 			return linearTraj, err
 		}
 		linearTraj = newTraj
+		pm.pc.planMeta.VelocityBreakpoints = breakpoints
 	}
 
 	return linearTraj, nil
