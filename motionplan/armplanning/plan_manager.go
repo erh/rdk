@@ -54,6 +54,8 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 		return nil, err
 	}
 
+	segmentContexts := []*planSegmentContext{}
+
 	for i, g := range pm.request.Goals {
 		if ctx.Err() != nil {
 			return linearTraj, err // note: here and below, we return traj because of ReturnPartialPlan
@@ -75,6 +77,7 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 				return linearTraj, err
 			}
 			linearTraj = append(linearTraj, newTraj...)
+			segmentContexts = nil
 		} else {
 			subGoals, cbirrtAllowed, err := pm.generateWaypoints(ctx, start, to)
 			if err != nil {
@@ -92,16 +95,28 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 
 			for subGoalIdx, sg := range subGoals {
 				singleGoalStart := time.Now()
-				newTraj, err := pm.planSingleGoal(ctx, linearTraj[len(linearTraj)-1], sg, cbirrtAllowed)
+				newTraj, psc, err := pm.planSingleGoal(ctx, linearTraj[len(linearTraj)-1], sg, cbirrtAllowed)
 				if err != nil {
 					pm.logger.Infof("\t subgoal %d failed after %v with: %v", subGoalIdx, time.Since(singleGoalStart), err)
 					return linearTraj, err
 				}
 				pm.logger.Infof("\t subgoal %d took %v", subGoalIdx, time.Since(singleGoalStart))
 				linearTraj = append(linearTraj, newTraj...)
+				if segmentContexts != nil {
+					segmentContexts = append(segmentContexts, psc)
+				}
 			}
 		}
 		start = to
+	}
+
+	if segmentContexts != nil {
+		newTraj, err := smoothVelocities(ctx, segmentContexts, linearTraj, pm.logger)
+		if err != nil {
+			pm.logger.Warnf("smoothVelocities failed: %v", err)
+			return linearTraj, err
+		}
+		linearTraj = newTraj
 	}
 
 	return linearTraj, nil
@@ -172,7 +187,7 @@ func (pm *planManager) planSingleGoal(
 	start *referenceframe.LinearInputs,
 	goal referenceframe.FrameSystemPoses,
 	cbirrtAllowed bool,
-) ([]*referenceframe.LinearInputs, error) {
+) ([]*referenceframe.LinearInputs, *planSegmentContext, error) {
 	ctx, span := trace.StartSpan(ctx, "planSingleGoal")
 	defer span.End()
 	pm.logger.Debug("start configuration", logging.FloatArrayFormat{"", start.GetLinearizedInputs()})
@@ -180,7 +195,7 @@ func (pm *planManager) planSingleGoal(
 
 	psc, err := newPlanSegmentContext(ctx, pm.pc, start, goal)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	for x := range goal {
@@ -189,29 +204,29 @@ func (pm *planManager) planSingleGoal(
 
 	planSeed, err := initRRTSolutions(ctx, psc, pm.logger.Sublogger("solve"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if planSeed.steps != nil {
 		pm.logger.Debugf("found an ideal ik solution")
-		return planSeed.steps, nil
+		return planSeed.steps, psc, nil
 	} else if !cbirrtAllowed {
-		return nil, fmt.Errorf("linear with cbirrt not allowed and no direct solutions found")
+		return nil, nil, fmt.Errorf("linear with cbirrt not allowed and no direct solutions found")
 	}
 
 	pm.logger.Debugf("initRRTSolutions goalMap size: %d", len(planSeed.maps.goalMap))
 	pathPlanner, err := newCBiRRTMotionPlanner(ctx, pm.pc, psc, pm.logger.Sublogger("cbirrt"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	finalSteps, err := pathPlanner.rrtRunner(ctx, planSeed.maps)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	finalSteps.steps = smoothPath(ctx, psc, finalSteps.steps)
-	return finalSteps.steps, nil
+	return finalSteps.steps, psc, nil
 }
 
 // generateWaypoints will return the list of atomic waypoints that correspond to a specific goal in a plan request.
