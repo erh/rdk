@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/multierr"
 	"go.viam.com/utils/trace"
 
 	"go.viam.com/rdk/logging"
@@ -56,6 +57,8 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 
 	segmentContexts := []*planSegmentContext{}
 
+	var singleGoalError error
+goals:
 	for i, g := range pm.request.Goals {
 		if ctx.Err() != nil {
 			return linearTraj, err // note: here and below, we return traj because of ReturnPartialPlan
@@ -98,7 +101,8 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 				newTraj, psc, err := pm.planSingleGoal(ctx, linearTraj[len(linearTraj)-1], sg, cbirrtAllowed)
 				if err != nil {
 					pm.logger.Infof("\t subgoal %d failed after %v with: %v", subGoalIdx, time.Since(singleGoalStart), err)
-					return linearTraj, err
+					singleGoalError = err
+					break goals
 				}
 				pm.logger.Infof("\t subgoal %d took %v", subGoalIdx, time.Since(singleGoalStart))
 				linearTraj = append(linearTraj, newTraj...)
@@ -116,13 +120,13 @@ func (pm *planManager) planMultiWaypoint(ctx context.Context) ([]*referenceframe
 		newTraj, breakpoints, err := smoothVelocities(ctx, segmentContexts, linearTraj, pm.logger)
 		if err != nil {
 			pm.logger.Warnf("smoothVelocities failed: %v", err)
-			return linearTraj, err
+			return linearTraj, multierr.Combine(err, singleGoalError)
 		}
 		linearTraj = newTraj
 		pm.pc.planMeta.VelocityBreakpoints = breakpoints
 	}
 
-	return linearTraj, nil
+	return linearTraj, singleGoalError
 }
 
 func (pm *planManager) planToDirectJoints(
