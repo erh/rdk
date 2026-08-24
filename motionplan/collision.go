@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang/geo/r3"
+
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/spatialmath"
@@ -192,16 +194,15 @@ func checkCollisionsHinted(
 	// slow pairs still surface, without the per-pair clock tax.
 	timeChecks := logger.GetLevel() <= logging.DEBUG
 	var pairCounter atomic.Uint64
-	checkOnePair := func(xName, yName string, xGeometry, yGeometry spatialmath.Geometry) (bool, error) {
+	checkOnePair := func(x, y *namedGeom) (bool, error) {
+		xName, yName, xGeometry, yGeometry := x.name, y.name, x.g, y.g
 		// Bounding-sphere broadphase: most pairs in the moving-vs-static
 		// product are nowhere near each other, and even the cached narrow
 		// phase costs three orders of magnitude more than this gap test.
-		if cx, rx, okx := spatialmath.BoundingSphere(xGeometry); okx {
-			if cy, ry, oky := spatialmath.BoundingSphere(yGeometry); oky {
-				if gap := cx.Sub(cy).Norm() - rx - ry; gap > collisionBufferMM {
-					minDistance = min(minDistance, gap)
-					return false, nil
-				}
+		if x.bok && y.bok {
+			if gap := x.bcenter.Sub(y.bcenter).Norm() - x.brad - y.brad; gap > collisionBufferMM {
+				minDistance = min(minDistance, gap)
+				return false, nil
 			}
 		}
 		var start time.Time
@@ -262,7 +263,7 @@ func checkCollisionsHinted(
 				if y == nil || skipPair(x, y) {
 					return false, nil
 				}
-				return checkOnePair(x.name, y.name, x.g, y.g)
+				return checkOnePair(x, y)
 			}
 			for _, pair := range [2][2]string{{h[0], h[1]}, {h[1], h[0]}} {
 				stop, err := tryHint(pair[0], pair[1])
@@ -287,7 +288,7 @@ func checkCollisionsHinted(
 			if skipPair(x, y) {
 				continue
 			}
-			stop, err := checkOnePair(x.name, y.name, x.g, y.g)
+			stop, err := checkOnePair(x, y)
 			if err != nil {
 				return nil, math.Inf(-1), err
 			}
@@ -307,6 +308,12 @@ type namedGeom struct {
 	name    string
 	g       spatialmath.Geometry
 	inAllow bool
+	// Bounding sphere in world coordinates, computed once per geometry per
+	// call: deriving it per pair made pose decomposition (DualQuaternion.Point
+	// under BoundingSphere) the hottest non-GC entry in mesh-heavy scenes.
+	bcenter r3.Vector
+	brad    float64
+	bok     bool
 }
 
 var namedGeomPool = sync.Pool{New: func() any { s := make([]namedGeom, 0, 64); return &s }}
@@ -323,6 +330,7 @@ func nameGeoms(geoms []spatialmath.Geometry, unnamedBase int, allowed map[[2]str
 			unnamedBase++
 		}
 		ng := namedGeom{name: label, g: g}
+		ng.bcenter, ng.brad, ng.bok = spatialmath.BoundingSphere(g)
 		switch {
 		case allowNames != nil:
 			ng.inAllow = allowNames[label]
