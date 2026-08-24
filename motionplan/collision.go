@@ -213,6 +213,14 @@ func checkCollisionsHinted(
 				return false, nil
 			}
 		}
+		// Mesh-mesh cover pre-gate: prove near-but-clear pairs collision-free
+		// with a sphere sweep before paying for the triangle/BVH walk.
+		if len(x.cover) > 0 && len(y.cover) > 0 {
+			if gap, clear := coverPairClearance(x.cover, y.cover, collisionBufferMM); clear {
+				minDistance = min(minDistance, gap)
+				return false, nil
+			}
+		}
 		var start time.Time
 		timeThis := timeChecks && pairCounter.Add(1)&15 == 0
 		if timeThis {
@@ -322,6 +330,34 @@ type namedGeom struct {
 	bcenter r3.Vector
 	brad    float64
 	bok     bool
+	// cover is the world-space sphere cover, filled for meshes only: the
+	// mesh-vs-mesh triangle/BVH narrow phase is orders of magnitude more
+	// expensive than a cover-vs-cover sweep, so near-but-clear mesh pairs
+	// (arms gliding past each other) are worth a conservative pre-gate.
+	// Other geometry types keep their already-cheap anchored narrow phases.
+	cover []spatialmath.SphereBound
+}
+
+// maxCoverGateSpheres bounds the quadratic cover-vs-cover sweep.
+const maxCoverGateSpheres = 64
+
+// coverPairClearance returns the smallest sphere-pair gap and whether every
+// pair clears the buffer (a conservative proof of no collision). Bails out on
+// the first non-clearing pair.
+func coverPairClearance(a, b []spatialmath.SphereBound, buffer float64) (float64, bool) {
+	minGap := math.Inf(1)
+	for i := range a {
+		for j := range b {
+			d := a[i].Center.Sub(b[j].Center).Norm() - a[i].R - b[j].R
+			if d <= buffer {
+				return 0, false
+			}
+			if d < minGap {
+				minGap = d
+			}
+		}
+	}
+	return minGap, true
 }
 
 var namedGeomPool = sync.Pool{New: func() any { s := make([]namedGeom, 0, 64); return &s }}
@@ -339,6 +375,11 @@ func nameGeoms(geoms []spatialmath.Geometry, unnamedBase int, allowed map[[2]str
 		}
 		ng := namedGeom{name: label, g: g}
 		ng.bcenter, ng.brad, ng.bok = spatialmath.BoundingSphere(g)
+		if _, isMesh := g.(*spatialmath.Mesh); isMesh {
+			if c := spatialmath.SphereCover(g); len(c) > 0 && len(c) <= maxCoverGateSpheres {
+				ng.cover = c
+			}
+		}
 		switch {
 		case allowNames != nil:
 			ng.inAllow = allowNames[label]
@@ -376,7 +417,8 @@ func prenameGeoms(geoms []spatialmath.Geometry, allowed map[[2]string]bool) []na
 
 func putNamedGeoms(s []namedGeom) {
 	for i := range s {
-		s[i].g = nil // don't retain geometries across pool reuse
+		s[i].g = nil // don't retain geometries or covers across pool reuse
+		s[i].cover = nil
 	}
 	s = s[:0]
 	namedGeomPool.Put(&s)
