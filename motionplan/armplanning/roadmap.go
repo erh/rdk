@@ -3,13 +3,18 @@ package armplanning
 import (
 	"container/heap"
 	"context"
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -76,6 +81,11 @@ type roadmap struct {
 	// readers (peekRoadmap) must check it before touching any other field.
 	built atomic.Bool
 
+	// key is the registry key; used to derive the disk-cache filename.
+	key string
+	// lastSaveNs throttles disk saves (unix nanos of the last save).
+	lastSaveNs atomic.Int64
+
 	// sceneVerdicts caches per-scene edge validity: key -> bool.
 	sceneVerdicts sync.Map // roadmapVerdictKey -> bool
 
@@ -112,9 +122,13 @@ func getRoadmap(psc *PlanSegmentContext, logger logging.Logger) *roadmap {
 	}
 	sort.Strings(frames)
 	key := roadmapKeyFor(psc, frames)
-	v, _ := roadmapRegistry.LoadOrStore(key, &roadmap{frames: frames})
+	v, _ := roadmapRegistry.LoadOrStore(key, &roadmap{frames: frames, key: key})
 	rm := v.(*roadmap)
 	rm.buildOnce.Do(func() {
+		if rm.loadFromDisk(logger) {
+			rm.built.Store(true)
+			return
+		}
 		rm.buildErr = rm.build(psc, logger)
 	})
 	if rm.buildErr != nil {
@@ -718,4 +732,124 @@ func (pm *planManager) harvestPlan(psc *PlanSegmentContext, steps []*referencefr
 		return
 	}
 	rm.harvest(psc, pm.roadmapSceneKey(psc, rm), steps, logger)
+	rm.saveToDiskThrottled(logger)
+}
+
+// Roadmap disk persistence. The roadmap's value compounds with experience:
+// harvested corridors and per-scene edge verdicts are what turn a 45-120s
+// cold search into a sub-second warm replay. A process restart threw all of
+// that away. When MOTION_ROADMAP_CACHE_DIR is set (cmd-plan sets a default;
+// the library leaves it opt-in), each roadmap is saved there after harvests
+// and loaded instead of built on the next process start. Safety: the
+// filename is derived from the registry key (frame system + chain + goal
+// frame), the file carries the frames/dims for an identity check, and edge
+// verdicts stay keyed by the scene fingerprint, so a changed scene simply
+// misses rather than misapplies. A corrupt or mismatched file is ignored and
+// the roadmap is rebuilt.
+
+type roadmapDiskVerdict struct {
+	Scene uint64 `json:"s"`
+	A     int32  `json:"a"`
+	B     int32  `json:"b"`
+	Clear bool   `json:"c"`
+}
+
+type roadmapDisk struct {
+	Frames    []string             `json:"frames"`
+	Dims      []int                `json:"dims"`
+	GoalFrame string               `json:"goal_frame"`
+	Flat      [][]float64          `json:"flat"`
+	Neighbors [][]int              `json:"neighbors"`
+	EePos     [][3]float64         `json:"ee_pos"`
+	Verdicts  []roadmapDiskVerdict `json:"verdicts"`
+}
+
+// roadmapSaveMinInterval bounds how often one roadmap writes its cache file.
+const roadmapSaveMinInterval = 5 * time.Second
+
+func roadmapCachePath(key string) string {
+	dir := os.Getenv("MOTION_ROADMAP_CACHE_DIR")
+	if dir == "" {
+		return ""
+	}
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return filepath.Join(dir, fmt.Sprintf("roadmap-%016x.json", h.Sum64()))
+}
+
+func (rm *roadmap) loadFromDisk(logger logging.Logger) bool {
+	path := roadmapCachePath(rm.key)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var d roadmapDisk
+	if err := json.Unmarshal(data, &d); err != nil {
+		logger.Debugf("roadmap cache %s unreadable, rebuilding: %v", path, err)
+		return false
+	}
+	if len(d.Frames) != len(rm.frames) || len(d.Flat) == 0 || len(d.Flat) != len(d.Neighbors) || len(d.Flat) != len(d.EePos) {
+		return false
+	}
+	for i, f := range rm.frames {
+		if d.Frames[i] != f {
+			return false
+		}
+	}
+	rm.dims = d.Dims
+	rm.goalFrame = d.GoalFrame
+	rm.flat = d.Flat
+	rm.neighbors = d.Neighbors
+	rm.eePos = d.EePos
+	for _, v := range d.Verdicts {
+		rm.sceneVerdicts.Store(roadmapVerdictKey{scene: v.Scene, a: v.A, b: v.B}, v.Clear)
+	}
+	logger.Debugf("roadmap loaded from %s: %d nodes, %d verdicts", path, len(rm.flat), len(d.Verdicts))
+	return true
+}
+
+func (rm *roadmap) saveToDiskThrottled(logger logging.Logger) {
+	path := roadmapCachePath(rm.key)
+	if path == "" {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := rm.lastSaveNs.Load()
+	if last != 0 && time.Duration(now-last) < roadmapSaveMinInterval {
+		return
+	}
+	if !rm.lastSaveNs.CompareAndSwap(last, now) {
+		return
+	}
+	d := roadmapDisk{GoalFrame: rm.goalFrame}
+	rm.mu.RLock()
+	d.Frames = append([]string{}, rm.frames...)
+	d.Dims = append([]int{}, rm.dims...)
+	d.Flat = rm.flat[:len(rm.flat):len(rm.flat)]
+	d.Neighbors = rm.neighbors[:len(rm.neighbors):len(rm.neighbors)]
+	d.EePos = rm.eePos[:len(rm.eePos):len(rm.eePos)]
+	rm.mu.RUnlock()
+	rm.sceneVerdicts.Range(func(k, v any) bool {
+		kk := k.(roadmapVerdictKey)
+		d.Verdicts = append(d.Verdicts, roadmapDiskVerdict{Scene: kk.scene, A: kk.a, B: kk.b, Clear: v.(bool)})
+		return true
+	})
+	data, err := json.Marshal(&d)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return
+	}
+	logger.Debugf("roadmap saved to %s: %d nodes, %d verdicts", path, len(d.Flat), len(d.Verdicts))
 }
