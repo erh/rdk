@@ -131,6 +131,7 @@ func coverSetFor(state *StateFS, fs *referenceframe.FrameSystem, table *frameCov
 	}
 	cs := &stateCoverSet{}
 	fk := fs.NewFrameToWorld(state.Configuration)
+	defer fk.Release()
 	for i := range table.entries {
 		e := &table.entries[i]
 		q, tr, err := fk.PoseQT(e.parentName)

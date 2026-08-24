@@ -610,13 +610,27 @@ func (m *Mesh) CollidesWith(g Geometry, collisionBufferMM float64) (bool, float6
 	case *Triangle:
 		// Wrap in a Mesh so we get the negative-cache short-circuit in
 		// collidesWithMesh — RRT smoothing re-checks the same triangle at the
-		// same pose, and the geometry-BVH path has no negCache. The wrap is
-		// cheap now that NewMesh defers PLY serialization (ensurePLYBytes).
-		triMesh := NewMesh(NewZeroPose(), []*Triangle{other}, "")
-		return m.collidesWithMesh(triMesh, collisionBufferMM)
+		// same pose, and the geometry-BVH path has no negCache. The wrapper is
+		// memoized per triangle: collidesWithMesh keys its caches on the
+		// wrapper's state identity, so a fresh wrapper per call would both
+		// defeat those caches and leak dead entries into m.state's maps.
+		return m.collidesWithMesh(wrapTriangle(other), collisionBufferMM)
 	default:
 		return true, math.Inf(1), newCollisionTypeUnsupportedError(m, g)
 	}
+}
+
+// triWrapCache memoizes the Mesh wrapper for standalone *Triangle geometries
+// (see the Triangle cases in CollidesWith / DistanceFrom). Keyed by triangle
+// identity; standalone triangle geometries are stable scene objects.
+var triWrapCache sync.Map // *Triangle -> *Mesh
+
+func wrapTriangle(t *Triangle) *Mesh {
+	if v, ok := triWrapCache.Load(t); ok {
+		return v.(*Mesh)
+	}
+	actual, _ := triWrapCache.LoadOrStore(t, NewMesh(NewZeroPose(), []*Triangle{t}, ""))
+	return actual.(*Mesh)
 }
 
 // EncompassedBy returns whether this mesh is completely contained within another geometry.
@@ -669,8 +683,7 @@ func (m *Mesh) DistanceFrom(g Geometry) (float64, error) {
 	case *sphere:
 		return m.distanceFromSphere(other), nil
 	case *Triangle:
-		triMesh := NewMesh(NewZeroPose(), []*Triangle{other}, "")
-		return m.distanceFromMesh(triMesh)
+		return m.distanceFromMesh(wrapTriangle(other))
 	case *Mesh:
 		return m.distanceFromMesh(other)
 	case *Cylinder:
