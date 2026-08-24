@@ -251,7 +251,27 @@ func (pm *planManager) planSingleGoal(
 		pm.logger.Debugf("roadmap path failed to smooth, falling back: %v", err)
 	}
 
-	rawSteps, err := pm.raceCBiRRT(ctx, psc, planSeed.maps)
+	// Reconfiguration-vs-constraint detection: when every reachable goal
+	// configuration is a large joint-space move while the end effector barely
+	// moves AND a linear constraint pins the path to a narrow tube, the
+	// reconfiguration swing almost certainly cannot stay inside the tube.
+	// Search still gets one full racing round (the heuristic is not a proof),
+	// but relaunching draws against a wall like that only burns the budget -
+	// and the warning tells the caller what to actually fix.
+	allowRelaunch := true
+	if lc := tightestLinearConstraintMM(pm.request.Constraints); lc > 0 && planSeed.maps.optNode != nil {
+		eeDelta := maxGoalTranslationMM(psc)
+		if eeDelta >= 0 && eeDelta < 50 && lc <= 50 && planSeed.maps.optNode.cost > 1.5 {
+			pm.logger.Warnf("goal is %0.1fmm of end-effector motion but the nearest valid goal configuration is "+
+				"%0.2f rad of joint motion; a linear constraint of %0.0fmm likely cannot accommodate that "+
+				"reconfiguration. Planning one search round only. Consider relaxing the constraint for this step "+
+				"or approaching in a different joint configuration.",
+				eeDelta, planSeed.maps.optNode.cost, lc)
+			allowRelaunch = false
+		}
+	}
+
+	rawSteps, err := pm.raceCBiRRT(ctx, psc, planSeed.maps, allowRelaunch)
 	if err != nil {
 		return nil, err
 	}
@@ -461,6 +481,7 @@ func (pm *planManager) raceCBiRRT(
 	ctx context.Context,
 	psc *PlanSegmentContext,
 	maps *rrtMaps,
+	allowRelaunch bool,
 ) ([]*referenceframe.LinearInputs, error) {
 	attempts := max(1, cbirrtRaceAttempts)
 
@@ -530,7 +551,7 @@ func (pm *planManager) raceCBiRRT(
 			return r.steps, nil
 		}
 		inFlight--
-		if raceCtx.Err() == nil && totalLaunched < maxTotalAttempts {
+		if allowRelaunch && raceCtx.Err() == nil && totalLaunched < maxTotalAttempts {
 			pm.logger.Debugf("cbirrt race: attempt %d exhausted (%v); relaunching as attempt %d", r.attempt, r.err, totalLaunched)
 			launch(totalLaunched)
 			totalLaunched++
@@ -544,4 +565,36 @@ func (pm *planManager) raceCBiRRT(
 		}
 	}
 	return nil, firstErr
+}
+
+// tightestLinearConstraintMM returns the smallest line tolerance among the
+// request's linear constraints, or 0 when none are set.
+func tightestLinearConstraintMM(c *motionplan.Constraints) float64 {
+	if c == nil {
+		return 0
+	}
+	out := 0.0
+	for _, lc := range c.LinearConstraint {
+		if lc.LineToleranceMm > 0 && (out == 0 || lc.LineToleranceMm < out) {
+			out = lc.LineToleranceMm
+		}
+	}
+	return out
+}
+
+// maxGoalTranslationMM returns the largest straight-line translation any goal
+// frame must cover for this segment, or -1 when it cannot be computed.
+func maxGoalTranslationMM(psc *PlanSegmentContext) float64 {
+	out := -1.0
+	for f, gp := range psc.goal {
+		sp, ok := psc.startPoses[f]
+		if !ok {
+			return -1
+		}
+		d := gp.Pose().Point().Sub(sp.Pose().Point()).Norm()
+		if d > out {
+			out = d
+		}
+	}
+	return out
 }
