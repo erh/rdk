@@ -241,10 +241,26 @@ func (pm *planManager) planSingleGoal(
 		}
 	}
 	if path := pm.tryRoadmap(ctx, psc, goalRoots, pm.logger.Sublogger("roadmap")); path != nil {
+		rm := getRoadmap(psc, pm.logger)
+		sceneKey := uint64(0)
+		if rm != nil {
+			sceneKey = pm.roadmapSceneKey(psc, rm)
+			// Replayed corridor in an unchanged scene: the smoothed and
+			// close-obstacle-expanded trajectory is deterministic and was
+			// validated when first computed - skip recomputing it.
+			if cached := rm.cachedSmoothed(psc, sceneKey, path); cached != nil {
+				pm.logger.Debugf("solved via roadmap (cached smooth): %d waypoints", len(cached))
+				pm.pc.planMeta.GoalsRoadmapSolved++
+				return cached, nil
+			}
+		}
 		smoothed, compact, err := smoothPath(ctx, psc, path)
 		if err == nil {
 			pm.logger.Debugf("solved via roadmap: %d -> %d waypoints", len(path), len(smoothed))
 			pm.pc.planMeta.GoalsRoadmapSolved++
+			if rm != nil {
+				rm.storeSmoothed(sceneKey, path, smoothed)
+			}
 			pm.harvestPlan(psc, compact, pm.logger)
 			return smoothed, nil
 		}

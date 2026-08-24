@@ -89,6 +89,16 @@ type roadmap struct {
 	// sceneVerdicts caches per-scene edge validity: key -> bool.
 	sceneVerdicts sync.Map // roadmapVerdictKey -> bool
 
+	// smoothedCache memoizes the final smoothed-and-expanded trajectory for a
+	// (scene, raw roadmap path) pair. Smoothing plus close-obstacle expansion
+	// is the dominant cost of a warm roadmap solve (~0.5s of a 0.75s plan on
+	// a captured dual-arm scene) and is deterministic given the same scene
+	// and the same raw waypoints, which is exactly what a replayed corridor
+	// produces. Persisted with the roadmap.
+	smoothedCache sync.Map // uint64 -> [][]float64 (linearized configs)
+	// smoothedCount bounds smoothedCache growth.
+	smoothedCount atomic.Int64
+
 	buildOnce sync.Once
 	buildErr  error
 }
@@ -735,6 +745,65 @@ func (pm *planManager) harvestPlan(psc *PlanSegmentContext, steps []*referencefr
 	rm.saveToDiskThrottled(logger)
 }
 
+// roadmapSmoothedCacheCap bounds how many smoothed trajectories one roadmap
+// retains; corridors beyond that simply re-smooth.
+const roadmapSmoothedCacheCap = 64
+
+// smoothedPathKey hashes a scene fingerprint plus the raw path's configs.
+func smoothedPathKey(scene uint64, path []*referenceframe.LinearInputs) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	put := func(v uint64) {
+		for i := 0; i < 8; i++ {
+			buf[i] = byte(v >> (8 * i))
+		}
+		h.Write(buf[:])
+	}
+	put(scene)
+	for _, cfg := range path {
+		for _, f := range cfg.GetLinearizedInputs() {
+			put(math.Float64bits(f))
+		}
+	}
+	return h.Sum64()
+}
+
+// cachedSmoothed returns the memoized final trajectory for this scene+path,
+// or nil.
+func (rm *roadmap) cachedSmoothed(psc *PlanSegmentContext, scene uint64, path []*referenceframe.LinearInputs) []*referenceframe.LinearInputs {
+	v, ok := rm.smoothedCache.Load(smoothedPathKey(scene, path))
+	if !ok {
+		return nil
+	}
+	flat := v.([][]float64)
+	out := make([]*referenceframe.LinearInputs, 0, len(flat))
+	for _, f := range flat {
+		cfg, err := psc.pc.lis.FloatsToInputs(f)
+		if err != nil {
+			return nil
+		}
+		out = append(out, cfg)
+	}
+	return out
+}
+
+// storeSmoothed memoizes a final trajectory for this scene+path.
+func (rm *roadmap) storeSmoothed(scene uint64, path, smoothed []*referenceframe.LinearInputs) {
+	if rm.smoothedCount.Load() >= roadmapSmoothedCacheCap {
+		return
+	}
+	flat := make([][]float64, 0, len(smoothed))
+	for _, cfg := range smoothed {
+		src := cfg.GetLinearizedInputs()
+		f := make([]float64, len(src))
+		copy(f, src)
+		flat = append(flat, f)
+	}
+	if _, loaded := rm.smoothedCache.LoadOrStore(smoothedPathKey(scene, path), flat); !loaded {
+		rm.smoothedCount.Add(1)
+	}
+}
+
 // Roadmap disk persistence. The roadmap's value compounds with experience:
 // harvested corridors and per-scene edge verdicts are what turn a 45-120s
 // cold search into a sub-second warm replay. A process restart threw all of
@@ -762,6 +831,9 @@ type roadmapDisk struct {
 	Neighbors [][]int              `json:"neighbors"`
 	EePos     [][3]float64         `json:"ee_pos"`
 	Verdicts  []roadmapDiskVerdict `json:"verdicts"`
+	// Smoothed maps smoothedPathKey (as decimal string; JSON keys must be
+	// strings) to the final trajectory's linearized configs.
+	Smoothed map[string][][]float64 `json:"smoothed,omitempty"`
 }
 
 // roadmapSaveMinInterval bounds how often one roadmap writes its cache file.
@@ -807,6 +879,13 @@ func (rm *roadmap) loadFromDisk(logger logging.Logger) bool {
 	for _, v := range d.Verdicts {
 		rm.sceneVerdicts.Store(roadmapVerdictKey{scene: v.Scene, a: v.A, b: v.B}, v.Clear)
 	}
+	for k, traj := range d.Smoothed {
+		var key uint64
+		if _, err := fmt.Sscanf(k, "%d", &key); err == nil {
+			rm.smoothedCache.Store(key, traj)
+			rm.smoothedCount.Add(1)
+		}
+	}
 	logger.Debugf("roadmap loaded from %s: %d nodes, %d verdicts", path, len(rm.flat), len(d.Verdicts))
 	return true
 }
@@ -835,6 +914,11 @@ func (rm *roadmap) saveToDiskThrottled(logger logging.Logger) {
 	rm.sceneVerdicts.Range(func(k, v any) bool {
 		kk := k.(roadmapVerdictKey)
 		d.Verdicts = append(d.Verdicts, roadmapDiskVerdict{Scene: kk.scene, A: kk.a, B: kk.b, Clear: v.(bool)})
+		return true
+	})
+	d.Smoothed = map[string][][]float64{}
+	rm.smoothedCache.Range(func(k, v any) bool {
+		d.Smoothed[fmt.Sprintf("%d", k.(uint64))] = v.([][]float64)
 		return true
 	})
 	data, err := json.Marshal(&d)
