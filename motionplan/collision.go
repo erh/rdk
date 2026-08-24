@@ -142,6 +142,7 @@ func collisionSpecifications(
 // needed here.
 func checkCollisionsHinted(
 	gg, other []spatialmath.Geometry,
+	otherPre []namedGeom,
 	allowed map[[2]string]bool,
 	collisionBufferMM float64,
 	collectAllCollisions bool,
@@ -167,7 +168,14 @@ func checkCollisionsHinted(
 	ggN := nameGeoms(gg, 0, allowed, allowNames)
 	defer putNamedGeoms(ggN)
 	otherN := ggN
-	if !sameSet {
+	switch {
+	case otherPre != nil:
+		// Prebuilt set (the checker's static geometries): names, allow flags,
+		// and bounding spheres computed once at checker construction instead
+		// of once per state check.
+		sameSet = false
+		otherN = otherPre
+	case !sameSet:
 		otherN = nameGeoms(other, len(gg), allowed, allowNames)
 		defer putNamedGeoms(otherN)
 	}
@@ -344,6 +352,25 @@ func nameGeoms(geoms []spatialmath.Geometry, unnamedBase int, allowed map[[2]str
 		}
 		out = append(out, ng)
 	}
+	return out
+}
+
+// prenameGeoms builds a long-lived namedGeom slice for a geometry set whose
+// poses never change (the checker's static side). The synthetic-name base for
+// unnamed geometries is far above anything the per-call moving side uses.
+func prenameGeoms(geoms []spatialmath.Geometry, allowed map[[2]string]bool) []namedGeom {
+	var allowNames map[string]bool
+	if len(allowed) > 16 {
+		allowNames = make(map[string]bool, len(allowed)*2)
+		for k := range allowed {
+			allowNames[k[0]] = true
+			allowNames[k[1]] = true
+		}
+	}
+	pooled := nameGeoms(geoms, 1<<20, allowed, allowNames)
+	out := make([]namedGeom, len(pooled))
+	copy(out, pooled)
+	putNamedGeoms(pooled)
 	return out
 }
 

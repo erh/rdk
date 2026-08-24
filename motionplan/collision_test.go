@@ -91,7 +91,7 @@ func TestCheckCollisionsHinted(t *testing.T) {
 	obstacles = append(obstacles, bc1.Transform(spatial.NewPoseFromPoint(r3.Vector{6, 6, 6})))
 	obstacles[2].SetLabel("obstacleCube666")
 
-	collisions, _, err := checkCollisionsHinted(robot, obstacles, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
+	collisions, _, err := checkCollisionsHinted(robot, obstacles, nil, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
 	test.That(t, err, test.ShouldBeNil)
 	expectedCollisions := []Collision{
 		{"robotCube333", "obstacleCube444"},
@@ -107,7 +107,7 @@ func TestCheckCollisionsHinted(t *testing.T) {
 	test.That(t, gf, test.ShouldNotBeNil)
 
 	selfGeoms := gf.Geometries()
-	collisions, _, err = checkCollisionsHinted(selfGeoms, selfGeoms, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
+	collisions, _, err = checkCollisionsHinted(selfGeoms, selfGeoms, nil, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(collisions), test.ShouldEqual, 5)
 }
@@ -122,8 +122,7 @@ func TestUniqueCollisions(t *testing.T) {
 	test.That(t, internalGeometries, test.ShouldNotBeNil)
 
 	zeroGeoms := internalGeometries.Geometries()
-	zeroPositionCollisions, _, err := checkCollisionsHinted(
-		zeroGeoms, zeroGeoms, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
+	zeroPositionCollisions, _, err := checkCollisionsHinted(zeroGeoms, zeroGeoms, nil, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
 	)
 	test.That(t, err, test.ShouldBeNil)
 
@@ -133,8 +132,7 @@ func TestUniqueCollisions(t *testing.T) {
 	test.That(t, internalGeometries, test.ShouldNotBeNil)
 
 	geoms := internalGeometries.Geometries()
-	collisions, _, err := checkCollisionsHinted(
-		geoms, geoms, makeAllowedCollisionsLookup(zeroPositionCollisions),
+	collisions, _, err := checkCollisionsHinted(geoms, geoms, nil, makeAllowedCollisionsLookup(zeroPositionCollisions),
 		defaultCollisionBufferMM, false, nil, logging.NewTestLogger(t),
 	)
 	test.That(t, err, test.ShouldBeNil)
@@ -146,8 +144,7 @@ func TestUniqueCollisions(t *testing.T) {
 	test.That(t, internalGeometries, test.ShouldNotBeNil)
 
 	geoms = internalGeometries.Geometries()
-	collisions, _, err = checkCollisionsHinted(
-		geoms, geoms, makeAllowedCollisionsLookup(zeroPositionCollisions),
+	collisions, _, err = checkCollisionsHinted(geoms, geoms, nil, makeAllowedCollisionsLookup(zeroPositionCollisions),
 		defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
 	)
 	test.That(t, err, test.ShouldBeNil)
@@ -160,8 +157,7 @@ func TestUniqueCollisions(t *testing.T) {
 	// case 3: add a collision specification that the last element of expectedCollisions should be ignored
 	zeroPositionCollisions = append(zeroPositionCollisions, expectedCollisions[len(expectedCollisions)-1])
 
-	collisions, _, err = checkCollisionsHinted(
-		geoms, geoms, makeAllowedCollisionsLookup(zeroPositionCollisions),
+	collisions, _, err = checkCollisionsHinted(geoms, geoms, nil, makeAllowedCollisionsLookup(zeroPositionCollisions),
 		defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
 	)
 	test.That(t, err, test.ShouldBeNil)
@@ -212,8 +208,7 @@ func TestCollisionMinDistance(t *testing.T) {
 	geom2 := bc1.Transform(spatial.NewPoseFromPoint(r3.Vector{10, 0, 0}))
 	geom2.SetLabel("box2")
 
-	collisions, minDist, err := checkCollisionsHinted(
-		[]spatial.Geometry{geom1}, []spatial.Geometry{geom2}, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
+	collisions, minDist, err := checkCollisionsHinted([]spatial.Geometry{geom1}, []spatial.Geometry{geom2}, nil, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t),
 	)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(collisions), test.ShouldEqual, 0)
@@ -235,12 +230,12 @@ func TestCollisionEarlyExit(t *testing.T) {
 	geoms := []spatial.Geometry{geom1, geom2, geom3}
 
 	// With collectAllCollisions=false, should return first collision only
-	collisions, _, err := checkCollisionsHinted(geoms, geoms, nil, defaultCollisionBufferMM, false, nil, logging.NewTestLogger(t))
+	collisions, _, err := checkCollisionsHinted(geoms, geoms, nil, nil, defaultCollisionBufferMM, false, nil, logging.NewTestLogger(t))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(collisions), test.ShouldEqual, 1)
 
 	// With collectAllCollisions=true, should return all collisions
-	collisions, _, err = checkCollisionsHinted(geoms, geoms, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
+	collisions, _, err = checkCollisionsHinted(geoms, geoms, nil, nil, defaultCollisionBufferMM, true, nil, logging.NewTestLogger(t))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(collisions), test.ShouldBeGreaterThan, 1)
 }
