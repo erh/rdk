@@ -485,7 +485,7 @@ func (pm *planManager) raceCBiRRT(
 	// converting a solvable plan into a timeout. The corridor-aiming already
 	// biases racers toward corridor-bearing roots without excluding the rest.
 
-	for a := 0; a < attempts; a++ {
+	launch := func(a int) {
 		go func(a int) {
 			logger := pm.logger.Sublogger(fmt.Sprintf("cbirrt%d", a))
 			planner, err := newCBiRRTMotionPlanner(raceCtx, pm.pc, psc, logger)
@@ -493,10 +493,11 @@ func (pm *planManager) raceCBiRRT(
 				results <- raceResult{nil, err, a}
 				return
 			}
-			// Continuous searches (restart-chopping was tried and hurt: the
-			// trees are the asset, and successful searches historically need
-			// several hundred iterations). Diversity comes from the racers'
-			// distinct RNG streams.
+			// Each attempt is a continuous full-budget search (restart-CHOPPING
+			// - truncating attempts below the full iteration budget - was tried
+			// and hurt: the trees are the asset, and successful searches
+			// historically need several hundred iterations). Diversity comes
+			// from the attempts' distinct RNG streams.
 			//nolint:gosec
 			planner.rnd = rand.New(rand.NewSource(int64(pm.pc.planOpts.RandomSeed) + int64(a)*7919))
 			sol, err := planner.rrtRunner(raceCtx, cloneRRTMaps(maps))
@@ -507,13 +508,34 @@ func (pm *planManager) raceCBiRRT(
 			results <- raceResult{sol.steps, nil, a}
 		}(a)
 	}
+	for a := 0; a < attempts; a++ {
+		launch(a)
+	}
 
+	// Search time is heavy-tailed: a full-budget attempt that exhausts its
+	// iterations was simply a bad draw, and with request budget remaining the
+	// slot is worth relaunching with a fresh stream and fresh tree clones.
+	// Fresh trees also keep the linear nearest-neighbor scan fast - letting
+	// one tree grow without bound makes each extend progressively slower.
+	// Before this, racers could exhaust 5000 iterations in 20s of a 300s
+	// request and fail the plan with 280s unused. maxTotalAttempts is a
+	// backstop against tight failure loops, not a budget.
+	const maxTotalAttempts = 64
+	totalLaunched := attempts
 	var firstErr error
-	for i := 0; i < attempts; i++ {
+	for inFlight := attempts; inFlight > 0; {
 		r := <-results
 		if r.err == nil {
 			pm.logger.Debugf("cbirrt race: attempt %d finished first (%d raw nodes)", r.attempt, len(r.steps))
 			return r.steps, nil
+		}
+		inFlight--
+		if raceCtx.Err() == nil && totalLaunched < maxTotalAttempts {
+			pm.logger.Debugf("cbirrt race: attempt %d exhausted (%v); relaunching as attempt %d", r.attempt, r.err, totalLaunched)
+			launch(totalLaunched)
+			totalLaunched++
+			inFlight++
+			continue
 		}
 		// Context cancellation of the losers is expected once someone wins;
 		// remember only the first real failure.

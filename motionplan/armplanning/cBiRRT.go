@@ -137,18 +137,8 @@ func (mp *cBiRRTMotionPlanner) rrtRunner(
 	target := newConfigurationNode(interpConfig)
 
 	iterCap := maxPlanIter
-	switch {
-	case mp.maxIter > 0 && mp.maxIter < iterCap:
+	if mp.maxIter > 0 && mp.maxIter < iterCap {
 		iterCap = mp.maxIter
-	default:
-		if _, hasDeadline := ctx.Deadline(); hasDeadline {
-			// With a real time budget the per-iteration ctx check is the
-			// terminator; a hard iteration cap strands the remaining budget
-			// (observed: racers exhausting 5000 iterations in 20s of a 300s
-			// request, then failing the plan). Keep a high cap purely as a
-			// runaway backstop.
-			iterCap = maxPlanIter * 20
-		}
 	}
 	map1, map2 := rrtMaps.startMap, rrtMaps.goalMap
 	for i := 0; i < iterCap; i++ {
