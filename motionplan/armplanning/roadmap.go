@@ -16,8 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang/geo/r3"
+
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
 )
 
 // This file implements a lazy probabilistic roadmap: a reusable graph over the
@@ -89,6 +93,20 @@ type roadmap struct {
 	// sceneVerdicts caches per-scene edge validity: key -> bool.
 	sceneVerdicts sync.Map // roadmapVerdictKey -> bool
 
+	// Dynamic-roadmap (DRM-style) state, all scene-independent and persisted:
+	// edgeVox holds each structural edge's swept workspace volume as sorted
+	// coarse voxel keys (computed lazily on first touch); cleanValid records
+	// edges that were fully validated in a scene whose occupancy did not
+	// intersect their swept volume - such a verdict transfers to any other
+	// scene that also misses the volume (same constraint fingerprint), which
+	// is what keeps a learned roadmap warm when obstacles move a little
+	// (per Leven & Hutchinson's dynamic roadmaps).
+	edgeVoxMu sync.RWMutex
+	edgeVox   map[uint64][]uint64
+	cleanValid sync.Map // drmVerdictKey -> bool(true)
+	// sceneOcc caches per-scene occupancy voxel sets (in-memory only).
+	sceneOcc sync.Map // uint64 -> map[uint64]struct{}
+
 	// smoothedCache memoizes the final smoothed-and-expanded trajectory for a
 	// (scene, raw roadmap path) pair. Smoothing plus close-obstacle expansion
 	// is the dominant cost of a warm roadmap solve (~0.5s of a 0.75s plan on
@@ -101,6 +119,11 @@ type roadmap struct {
 
 	buildOnce sync.Once
 	buildErr  error
+}
+
+type drmVerdictKey struct {
+	constraints uint64
+	a, b        int32
 }
 
 type roadmapVerdictKey struct {
@@ -386,6 +409,155 @@ func flatL2Sq(a, b []float64) float64 {
 	return t
 }
 
+// DRM voxel grid: fixed world-aligned grid so voxel keys are stable across
+// processes and scenes.
+const drmVoxelMM = 50.0
+
+// drmEdgeSampleL2 is the joint-space interval between swept-volume samples.
+// Finer sampling costs build time; the end-to-end validation in smoothPath
+// backstops the (rare) case where motion between samples clips a voxel the
+// sweep missed.
+const drmEdgeSampleL2 = 0.1
+
+func drmVoxelKey(x, y, z int32) uint64 {
+	return uint64(uint16(x))<<32 | uint64(uint16(y))<<16 | uint64(uint16(z))
+}
+
+// drmRasterizeSphere marks all voxels overlapping the sphere's AABB.
+func drmRasterizeSphere(c r3.Vector, r float64, out map[uint64]struct{}) {
+	x0, x1 := int32(math.Floor((c.X-r)/drmVoxelMM)), int32(math.Floor((c.X+r)/drmVoxelMM))
+	y0, y1 := int32(math.Floor((c.Y-r)/drmVoxelMM)), int32(math.Floor((c.Y+r)/drmVoxelMM))
+	z0, z1 := int32(math.Floor((c.Z-r)/drmVoxelMM)), int32(math.Floor((c.Z+r)/drmVoxelMM))
+	for x := x0; x <= x1; x++ {
+		for y := y0; y <= y1; y++ {
+			for z := z0; z <= z1; z++ {
+				out[drmVoxelKey(x, y, z)] = struct{}{}
+			}
+		}
+	}
+}
+
+func drmEdgeKey(a, b int) uint64 {
+	if a > b {
+		a, b = b, a
+	}
+	return uint64(a)<<32 | uint64(b)
+}
+
+// edgeSweptVoxels returns (computing and persisting on first touch) the
+// sorted voxel keys covering the chain's swept volume along edge a-b.
+func (rm *roadmap) edgeSweptVoxels(psc *PlanSegmentContext, a, b int) []uint64 {
+	ek := drmEdgeKey(a, b)
+	rm.edgeVoxMu.RLock()
+	v, ok := rm.edgeVox[ek]
+	rm.edgeVoxMu.RUnlock()
+	if ok {
+		return v
+	}
+	cfgA := rm.compose(psc.start, rm.flat[a])
+	cfgB := rm.compose(psc.start, rm.flat[b])
+	steps := int(math.Ceil(flatL2(rm.flat[a], rm.flat[b])/drmEdgeSampleL2)) + 1
+	if steps < 2 {
+		steps = 2
+	}
+	chain := map[string]bool{}
+	for _, f := range rm.frames {
+		chain[f] = true
+	}
+	set := map[uint64]struct{}{}
+	for i := 0; i <= steps; i++ {
+		cfg, err := referenceframe.InterpolateFS(psc.pc.fs, cfgA, cfgB, float64(i)/float64(steps))
+		if err != nil {
+			return nil
+		}
+		geoms, err := referenceframe.FrameSystemGeometriesForFrames(psc.pc.fs, cfg, chain)
+		if err != nil {
+			return nil
+		}
+		for _, gif := range geoms {
+			for _, g := range gif.Geometries() {
+				for _, sb := range spatialmath.SphereCover(g) {
+					drmRasterizeSphere(sb.Center, sb.R+drmVoxelMM/2, set)
+				}
+			}
+		}
+	}
+	out := make([]uint64, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	rm.edgeVoxMu.Lock()
+	if rm.edgeVox == nil {
+		rm.edgeVox = map[uint64][]uint64{}
+	}
+	rm.edgeVox[ek] = out
+	rm.edgeVoxMu.Unlock()
+	return out
+}
+
+func flatL2(a, b []float64) float64 { return math.Sqrt(flatL2Sq(a, b)) }
+
+// sceneOccupancy returns (cached per scene) the occupancy voxel set of
+// everything the chain can collide with: world obstacles plus the rest of the
+// robot at the query's start configuration, inflated by the collision buffer.
+func (rm *roadmap) sceneOccupancy(pm *planManager, psc *PlanSegmentContext, sceneKey uint64) map[uint64]struct{} {
+	if v, ok := rm.sceneOcc.Load(sceneKey); ok {
+		return v.(map[uint64]struct{})
+	}
+	occ := map[uint64]struct{}{}
+	inflate := drmVoxelMM/2 + pm.request.PlannerOptions.CollisionBufferMM
+	if pm.request.ObstaclesInWorldFrame != nil {
+		for _, g := range pm.request.ObstaclesInWorldFrame.Geometries() {
+			for _, sb := range spatialmath.SphereCover(g) {
+				drmRasterizeSphere(sb.Center, sb.R+inflate, occ)
+			}
+		}
+	}
+	chain := map[string]bool{}
+	for _, f := range rm.frames {
+		chain[f] = true
+	}
+	nonChain := map[string]bool{}
+	for _, name := range psc.pc.fs.FrameNames() {
+		if !chain[name] {
+			nonChain[name] = true
+		}
+	}
+	if geoms, err := referenceframe.FrameSystemGeometriesForFrames(psc.pc.fs, psc.start, nonChain); err == nil {
+		for _, gif := range geoms {
+			for _, g := range gif.Geometries() {
+				for _, sb := range spatialmath.SphereCover(g) {
+					drmRasterizeSphere(sb.Center, sb.R+inflate, occ)
+				}
+			}
+		}
+	}
+	actual, _ := rm.sceneOcc.LoadOrStore(sceneKey, occ)
+	return actual.(map[uint64]struct{})
+}
+
+func drmOverlaps(occ map[uint64]struct{}, voxels []uint64) bool {
+	for _, v := range voxels {
+		if _, hit := occ[v]; hit {
+			return true
+		}
+	}
+	return false
+}
+
+// constraintsFingerprint hashes the request's constraints; DRM verdict
+// transfer is only valid between scenes planned under identical constraints.
+func constraintsFingerprint(c *motionplan.Constraints) uint64 {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return 0
+	}
+	h := fnv.New64a()
+	h.Write(data)
+	return h.Sum64()
+}
+
 // tryRoadmap answers the query start -> any goal root through the roadmap
 // with lazily-validated edges. Returns the waypoint list (full
 // configurations, start included) or nil.
@@ -426,6 +598,11 @@ func (pm *planManager) tryRoadmap(
 	if len(goals) == 0 {
 		return nil
 	}
+
+	// DRM state for this query: scene occupancy and the constraint
+	// fingerprint under which clean verdicts may transfer.
+	occ := rm.sceneOccupancy(pm, psc, sceneKey)
+	constraintKey := constraintsFingerprint(pm.request.Constraints)
 
 	// Query graph ids: 0..N-1 roadmap, N = start, N+1+i = goal i.
 	n := len(rm.flat)
@@ -529,6 +706,16 @@ func (pm *planManager) tryRoadmap(
 			if v, ok := rm.sceneVerdicts.Load(key); ok {
 				return v.(bool)
 			}
+			// DRM transfer: this edge was fully validated under the same
+			// constraints in a scene whose occupancy missed its swept volume;
+			// if this scene's occupancy misses it too, the verdict carries
+			// over without a collision check.
+			if _, clean := rm.cleanValid.Load(drmVerdictKey{constraints: constraintKey, a: ka, b: kb}); clean {
+				if vox := rm.edgeSweptVoxels(psc, a, b); vox != nil && !drmOverlaps(occ, vox) {
+					rm.sceneVerdicts.Store(key, true)
+					return true
+				}
+			}
 		}
 		if budget <= 0 {
 			return false
@@ -538,6 +725,14 @@ func (pm *planManager) tryRoadmap(
 		ok := psc.CheckPath(ctx, cfgOf(a), cfgOf(b), true, nil) == nil
 		if cacheable {
 			rm.sceneVerdicts.Store(key, ok)
+			if ok {
+				// Record a clean verdict when nothing in this scene was near
+				// the edge's swept volume: validity then owed nothing to this
+				// scene's obstacles and is transferable.
+				if vox := rm.edgeSweptVoxels(psc, a, b); vox != nil && !drmOverlaps(occ, vox) {
+					rm.cleanValid.Store(drmVerdictKey{constraints: constraintKey, a: ka, b: kb}, true)
+				}
+			}
 		}
 		return ok
 	}
@@ -834,6 +1029,16 @@ type roadmapDisk struct {
 	// Smoothed maps smoothedPathKey (as decimal string; JSON keys must be
 	// strings) to the final trajectory's linearized configs.
 	Smoothed map[string][][]float64 `json:"smoothed,omitempty"`
+	// EdgeVox maps drmEdgeKey (decimal string) to sorted swept-volume voxels.
+	EdgeVox map[string][]uint64 `json:"edge_vox,omitempty"`
+	// CleanValid lists constraint-fingerprinted transferable edge verdicts.
+	CleanValid []roadmapDiskClean `json:"clean_valid,omitempty"`
+}
+
+type roadmapDiskClean struct {
+	Constraints uint64 `json:"k"`
+	A           int32  `json:"a"`
+	B           int32  `json:"b"`
 }
 
 // roadmapSaveMinInterval bounds how often one roadmap writes its cache file.
@@ -886,6 +1091,18 @@ func (rm *roadmap) loadFromDisk(logger logging.Logger) bool {
 			rm.smoothedCount.Add(1)
 		}
 	}
+	if len(d.EdgeVox) > 0 {
+		rm.edgeVox = make(map[uint64][]uint64, len(d.EdgeVox))
+		for k, vox := range d.EdgeVox {
+			var key uint64
+			if _, err := fmt.Sscanf(k, "%d", &key); err == nil {
+				rm.edgeVox[key] = vox
+			}
+		}
+	}
+	for _, cv := range d.CleanValid {
+		rm.cleanValid.Store(drmVerdictKey{constraints: cv.Constraints, a: cv.A, b: cv.B}, true)
+	}
 	logger.Debugf("roadmap loaded from %s: %d nodes, %d verdicts", path, len(rm.flat), len(d.Verdicts))
 	return true
 }
@@ -919,6 +1136,19 @@ func (rm *roadmap) saveToDiskThrottled(logger logging.Logger) {
 	d.Smoothed = map[string][][]float64{}
 	rm.smoothedCache.Range(func(k, v any) bool {
 		d.Smoothed[fmt.Sprintf("%d", k.(uint64))] = v.([][]float64)
+		return true
+	})
+	rm.edgeVoxMu.RLock()
+	if len(rm.edgeVox) > 0 {
+		d.EdgeVox = make(map[string][]uint64, len(rm.edgeVox))
+		for k, vox := range rm.edgeVox {
+			d.EdgeVox[fmt.Sprintf("%d", k)] = vox
+		}
+	}
+	rm.edgeVoxMu.RUnlock()
+	rm.cleanValid.Range(func(k, v any) bool {
+		kk := k.(drmVerdictKey)
+		d.CleanValid = append(d.CleanValid, roadmapDiskClean{Constraints: kk.constraints, A: kk.a, B: kk.b})
 		return true
 	})
 	data, err := json.Marshal(&d)
