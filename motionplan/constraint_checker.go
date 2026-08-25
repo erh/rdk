@@ -289,6 +289,9 @@ func checkOrientationConstraintEval(frame string, e *OrientationConstraintEval, 
 // per plan, and per-call span creation plus exporter wakeups measurably
 // dominated planning time once the checks themselves became cheap.
 func (c *ConstraintChecker) CheckStateFSConstraints(ctx context.Context, state *StateFS) (float64, error) {
+	// The cover evaluation is shared by the collision constraints below and
+	// recycled once this state check completes.
+	defer releaseCoverSet(state)
 	// Topological constraints (orientation/linear) cost a single FK pass —
 	// orders of magnitude cheaper than the collision sweeps below — so check
 	// them first: constrained planners generate many candidate states that fail
